@@ -29,6 +29,58 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Time between two consecutive key indices of a rolling-key accessory.
+_INDEX_INTERVAL = timedelta(minutes=15)
+# A secondary key is shared by at most two days of primary indices, see
+# `FindMyAccessory._secondary_keys_at`. Bounds the search for the indices of a key.
+_MAX_KEY_INDEX_SPAN = 2 * 96
+
+
+def _key_index_bounds(
+    accessory: RollingKeyPairSource,
+    key: KeyPair,
+    indices: set[int],
+) -> tuple[int, int]:
+    """
+    Get the lowest and highest index at which a key may be broadcast.
+
+    `indices` are the indices for which the key has been generated so far. Keys are generated in
+    batches, so for a key shared by several indices this may be only part of its range.
+    """
+    low, high = min(indices), max(indices)
+    if key.key_type != KeyPairType.SECONDARY:
+        return low, high
+
+    while high - low < _MAX_KEY_INDEX_SPAN and key in accessory.keys_at(low - 1):
+        low -= 1
+    while high - low < _MAX_KEY_INDEX_SPAN and key in accessory.keys_at(high + 1):
+        high += 1
+    return low, high
+
+
+def _align_to_report(
+    accessory: RollingKeyPairSource,
+    report: LocationReport,
+    key: KeyPair,
+    indices: set[int],
+) -> None:
+    """
+    Update the alignment of an accessory from a report decrypted with one of its keys.
+
+    The report only shows that the accessory used some index sharing `key` at the time of the
+    report: exactly one index for a primary key, up to two days of indices for a secondary key.
+    The alignment is set to the lowest of these, dated back by the width of the range. The minimum
+    index (the alignment index) then never exceeds the index the accessory used, and the maximum
+    index (the alignment index plus the time since the alignment date) never falls below it.
+
+    Aligning to the highest index instead overestimates the index by up to two days for secondary
+    keys. Because the search for the next fetch starts at the maximum index, every fetch can then
+    match the same secondary key at a higher index, and the alignment keeps moving ahead of the
+    accessory until it falls out of the range in which local (BLE) matching looks for its keys.
+    """
+    low, high = _key_index_bounds(accessory, key, indices)
+    accessory.update_alignment(report.timestamp - (high - low) * _INDEX_INTERVAL, low)
+
 
 class LocationReportEncryptedMapping(TypedDict):
     """JSON mapping representing an encrypted location report."""
@@ -416,7 +468,7 @@ class LocationReportsFetcher:
 
         return reports
 
-    async def _fetch_accessory_reports(  # noqa: C901
+    async def _fetch_accessory_reports(
         self,
         accessory: RollingKeyPairSource,
         only_latest: bool = False,
@@ -448,13 +500,7 @@ class LocationReportsFetcher:
                 key = id_to_key[report.hashed_adv_key_bytes]
                 report.decrypt(key)
 
-                # update alignment data on every report
-                # iterate in reverse sorted order to prevent potentially
-                # excessive internal updates and logging in the accessory,
-                # because most accessories probably only really care about
-                # the latest index anyway.
-                for i in sorted(key_to_ind[key], reverse=True):
-                    accessory.update_alignment(report.timestamp, i)
+                _align_to_report(accessory, report, key, key_to_ind[key])
 
             cur_keys_primary.clear()
             cur_keys_secondary.clear()
