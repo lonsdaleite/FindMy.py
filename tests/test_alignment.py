@@ -80,7 +80,7 @@ def test_primary_key_index_bounds() -> None:
 
 def test_secondary_reports_do_not_move_alignment_ahead(monkeypatch: pytest.MonkeyPatch) -> None:
     """
-    Fetches every 15 minutes that keep finding the current secondary key keep the accessory in range.
+    Fetches every 15 minutes that keep finding the current secondary key keep the tag in range.
 
     The accessory rolls its primary index every 15 minutes and stays on one secondary key, which is
     shared by indices up to two days ahead of the primary one. Reports arrive two hours late.
