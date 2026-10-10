@@ -40,21 +40,30 @@ def _key_index_bounds(
     accessory: RollingKeyPairSource,
     key: KeyPair,
     indices: set[int],
+    secondary_bounds: dict[KeyPair, tuple[int, int]],
 ) -> tuple[int, int]:
     """
     Get the lowest and highest index at which a key may be broadcast.
 
     `indices` are the indices for which the key has been generated so far. Keys are generated in
     batches, so for a key shared by several indices this may be only part of its range.
+
+    The range of a secondary key only depends on the key itself, so it is stored in
+    `secondary_bounds`: a fetch can return many reports for the same secondary key.
     """
     low, high = min(indices), max(indices)
     if key.key_type != KeyPairType.SECONDARY:
         return low, high
 
+    cached = secondary_bounds.get(key)
+    if cached is not None:
+        return cached
+
     while high - low < _MAX_KEY_INDEX_SPAN and key in accessory.keys_at(low - 1):
         low -= 1
     while high - low < _MAX_KEY_INDEX_SPAN and key in accessory.keys_at(high + 1):
         high += 1
+    secondary_bounds[key] = (low, high)
     return low, high
 
 
@@ -63,22 +72,25 @@ def _align_to_report(
     report: LocationReport,
     key: KeyPair,
     indices: set[int],
+    secondary_bounds: dict[KeyPair, tuple[int, int]],
 ) -> None:
     """
     Update the alignment of an accessory from a report decrypted with one of its keys.
 
     The report only shows that the accessory used some index sharing `key` at the time of the
     report: exactly one index for a primary key, up to two days of indices for a secondary key.
-    The alignment is set to the lowest of these, dated back by the width of the range. The minimum
-    index (the alignment index) then never exceeds the index the accessory used, and the maximum
-    index (the alignment index plus the time since the alignment date) never falls below it.
+    The alignment is set to the lowest of these, dated back by the width of the range. From the
+    time of the report on, the minimum index (the alignment index) then does not exceed the index
+    the accessory uses, and the maximum index (the alignment index plus the time since the
+    alignment date) does not fall below it. This holds as long as the accessory uses one of the
+    secondary keys that `keys_at` returns for its primary index.
 
     Aligning to the highest index instead overestimates the index by up to two days for secondary
     keys. Because the search for the next fetch starts at the maximum index, every fetch can then
     match the same secondary key at a higher index, and the alignment keeps moving ahead of the
     accessory until it falls out of the range in which local (BLE) matching looks for its keys.
     """
-    low, high = _key_index_bounds(accessory, key, indices)
+    low, high = _key_index_bounds(accessory, key, indices, secondary_bounds)
     accessory.update_alignment(report.timestamp - (high - low) * _INDEX_INTERVAL, low)
 
 
@@ -482,6 +494,7 @@ class LocationReportsFetcher:
         # mappings
         key_to_ind: dict[KeyPair, set[int]] = defaultdict(set)
         id_to_key: dict[bytes, KeyPair] = {}
+        secondary_bounds: dict[KeyPair, tuple[int, int]] = {}
 
         # state variables
         cur_keys_primary: set[str] = set()
@@ -500,7 +513,7 @@ class LocationReportsFetcher:
                 key = id_to_key[report.hashed_adv_key_bytes]
                 report.decrypt(key)
 
-                _align_to_report(accessory, report, key, key_to_ind[key])
+                _align_to_report(accessory, report, key, key_to_ind[key], secondary_bounds)
 
             cur_keys_primary.clear()
             cur_keys_secondary.clear()
